@@ -43,12 +43,17 @@ used to read it out.
 | Modem lines | DTR and RTS raised on open; RTS then DTR dropped on close |
 | Buffers | `SetupComm(1024, 1024)`, overlapped I/O, reads return at once |
 
-Port and baud are kept in `HKLM\Software\SE Program Suite`, values `Port`
+Port and baud can be kept in `HKLM\Software\SE Program Suite`, values `Port`
 (COM number) and `Baudrate`. If they are missing or don't work, the host tries
 COM1…COM8 at 57600, then 28800, on each port. A port and baud are accepted if
-the link handshake completes within **250 ms**, and the result is saved back
-to the registry. *Checking those two registry values on the XP ThinkPad tells
-you which rate your instrument uses.*
+the link handshake completes within **250 ms**. The result is written back
+only if the key already exists: the programs call `RegOpenKeyEx`, never
+`RegCreateKeyEx`. Without the key (as on the XP ThinkPad here), they rescan
+on every launch and record nothing. A capture of the line is then the way to
+learn the rate: `sesniff` cycles the candidate rates on a tap until frames
+with valid CRCs appear. It trusts the instrument's line, because during the
+scan the PC sends SYNC2 at 57600 on its own line even when the instrument
+uses 28800.
 
 The host runs at `HIGH_PRIORITY_CLASS` and allows one instance at a time (mutex
 `SEUtilityMutex`).
@@ -64,7 +69,12 @@ FF FF FF 7F   type  ack  seq  chan  count  data[count]  ts_lo ts_hi  crc0 crc1 c
 * CRC is standard CRC-32/IEEE (zlib `crc32`) over `type` … `ts_hi`, sent
   low byte first.
 * `ts` is a 16-bit timestamp. The PC always sends 0, and ignores the value it
-  receives (it computes a difference and never uses it).
+  receives (it computes a difference and never uses it). The instrument sends
+  its **800 Hz performance clock** (1.25 ms ticks, wrapping at 65536). On the
+  real piano it advanced 9,464 ticks = 11.83 s between "START PLAYING" and
+  "END OF PERFORMANCE". It reads 0 before playback. It counts up from about
+  −194 while the key help prints and passes 0 about 0.2 s after "START
+  PLAYING". It stops at the end.
 * There is no byte stuffing: the receiver finds the preamble, then counts
   bytes. A bad CRC drops the frame and the receiver hunts for the next
   preamble.
@@ -102,6 +112,17 @@ When both sides start at −1, both go −1 → 1 → 0 → 2. The host's sequen
 numbers start at 0 when the program starts and are never reset. Since
 re-running `play.exe` works, the instrument presumably resets its own on
 handshake (inferred, not seen in code).
+
+**The instrument does not follow that table** (observed on the real piano,
+`link/testdata/piano-handshake-57600.bin`). It **echoes** each handshake
+frame it receives: SYNC2 → SYNC2, SYNC1 → SYNC1, SYNC3 → SYNC3. It alternates
+every handshake frame with an IDLE frame, and counts itself up once it has
+received SYNC3. Against the host's table this still works: the host sends
+SYNC2 and gets SYNC2 back (→ 1), sends SYNC1 and gets SYNC1 (→ 0), sends
+SYNC3 and gets SYNC3 (→ up). If the instrument is already up from an
+earlier session it sends IDLE frames, and an incoming SYNC2 restarts its
+handshake. Unlike the PC, it transmits frames back to back with no `00`
+filler.
 
 ### Reliable delivery
 
@@ -148,6 +169,48 @@ answers with PURGE. `play.exe` never uses it.
   host generates **16 bytes** and writes them. This is its only pacing.
 * If no bytes arrive for **750 ms**, or a write is not finished after
   **1 s**, the host gives up with "Communicator Error".
+
+### Confirmed on the real host (2026-11-22)
+
+A Raspberry Pi with a Keyspan USA-19HS, null-modem-cabled to the XP ThinkPad,
+recorded `play.exe` scanning with no instrument attached
+(`link/testdata/playexe-scan-read-at-57600.bin`):
+
+* 91 SYNC2 frames at 57600 (≈ 250 ms), then 45 at 28800 (≈ 250 ms). The
+  28800 part reads as a repeating 19-byte pattern at 57600. A final frame
+  went out at 57600, probably the UART FIFO draining after the port's
+  previous settings were restored on close.
+* Every frame is byte-identical to `sepiano`'s encoding
+  (`ff ff ff 7f 02 00 00 00 00 00 00 57 ce f3 0a`): preamble, field order,
+  zero timestamp, CRC-32/IEEE little-endian.
+* Each refill is one frame plus one `00` filler byte: the 16-byte
+  `EV_TXEMPTY` chunks.
+
+### Confirmed with the instrument (2026-11-22)
+
+`sehost` on a Raspberry Pi 4, with a Prolific PL2303 USB adapter wired
+directly to the piano, played `10Sec-C9-400` from start to finish using the
+Z80 program from `play.exe` V50.45:
+
+* The instrument runs at **57600 baud**.
+* Handshake as described above; the upload of 255 frames (8,131 bytes) took
+  2.15 s. The instrument ACKed every frame and sent **no NAKs**. No frame was
+  corrupted, apart from the first one, cut off by opening the port
+  mid-frame.
+* File service exactly as specified. The player reads `.kb` in 1 KB
+  requests, `.lp` in 512 B and `.sp` in **256 B** requests. It opens and
+  reads all three once for the header, then reopens to play.
+* The console showed the banner, the copyright line, "LEVEL=0 (NORMAL)", the
+  key help, "START PLAYING", and 11.8 s later "END OF PERFORMANCE", followed
+  by ESC on channel 1.
+* The instrument re-offers its oldest unacknowledged frame, just like the
+  PC, so duplicates show up in traces; the link drops them.
+* A full performance, Rachmaninoff's Prelude in C♯ minor (3:49), played
+  through. The piano's clock, fitted against the Pi's wall clock, ran at
+  799.99 ticks/s and never paused. The 26 file reads were answered in 1 ms
+  (median), 4 ms at worst. There were no NAKs, and no corrupted frames
+  beyond the one cut off at port open. Listening at the piano, the pacing
+  sounded right.
 
 ## Program upload (channel 0)
 
@@ -234,8 +297,9 @@ Fatal errors make the host print the message and exit.
 4. `10` open, then `11 00 00 04` (1 KB of `.kb`). It prints the header text
    (the copyright line), then reopens with `10` to start over.
 5. It prints the key help and "START PLAYING", then plays. As its buffers
-   drain it sends `11 00 00 04` (key stream, 1 KB) and `11 01 00 02` /
-   `11 02 …` (pedals, 512 B). Look-ahead is large: 2000 bytes of key events,
+   drain it sends `11 00 00 04` (key stream, 1 KB), `11 01 00 02` (damper,
+   512 B) and `11 02 00 01` (soft pedal, 256 B). Look-ahead is large: 2000
+   bytes of key events,
    800 damper samples (8 s) and 400 soft samples (8 s).
 6. Keys arrive on channel 1.
 7. "END OF PERFORMANCE", then the Z80 sends ESC on channel 1. The host exits
@@ -243,8 +307,10 @@ Fatal errors make the host print the message and exit.
 
 ## Why a USB adapter could start playback and then stop
 
-This is an analysis, not yet confirmed on hardware. The host's design assumes
-a real 16550 UART:
+This is an analysis, not confirmed on the failing laptop. A USB adapter
+itself is not the problem: a PL2303 on Linux with `sepiano`'s clock pacing
+ran a session without a single error. The host's design assumes a real
+16550 UART:
 
 1. **Pacing through `EV_TXEMPTY`.** On a UART this event fires when the
    16-byte FIFO drains, so the host is never more than about 3 ms ahead of
@@ -277,9 +343,12 @@ deliberate changes:
   the frame for its *current* state. A side that handles two transitions
   before transmitting can skip a state, and its peer then waits for ever. The
   original mostly avoids this by handling one frame per loop. `sepiano`
-  always emits a frame for each state it passes through. If it is waiting in
-  state 0 and the peer sends idle, ACK or data frames (which only a connected
-  peer sends), it treats the link as up. Tests run it against a deliberately
-  adversarial copy of the original logic (`Link.Strict`).
+  always emits a frame for each state it passes through. If it waits in
+  state 0 through 16 consecutive frames with no handshake frame among them,
+  it treats the peer as already up. (An earlier version needed just one IDLE
+  frame. The real instrument interleaves IDLE with its handshake frames, so
+  that came up too early; tests now replay the instrument's own capture.)
+  Tests also run it against a deliberately adversarial copy of the original
+  logic (`Link.Strict`) and an echoing model of the firmware.
 * A SYNC frame arriving after the link is up (the instrument restarted) ends
   the session with an error instead of stalling.

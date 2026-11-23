@@ -12,6 +12,12 @@ const (
 	rxStopAt   = 0xAA9
 	rxResumeAt = 0x7FF
 	window     = 8 // data frames in flight before go-back-N
+
+	// quietUp is how many consecutive frames without a handshake frame, while
+	// waiting in state 0, mean the peer is already up. The instrument
+	// alternates IDLE and handshake frames, so during a handshake it never
+	// sends more than one IDLE in a row.
+	quietUp = 16
 )
 
 // States of the handshake.
@@ -54,6 +60,7 @@ type Link struct {
 
 	state       int
 	hello       []byte  // handshake frames owed to the peer
+	quiet       int     // consecutive non-handshake frames received in state 0
 	rxq         []Frame // Strict: received frames not yet handled
 	recvNext    byte    // next sequence number expected from the peer
 	needAck     bool
@@ -135,10 +142,15 @@ func (l *Link) Receive(f Frame) {
 }
 
 func (l *Link) receive(f Frame) {
-	if !l.Strict && l.state == stateS0 && f.Type != TypeSync1 && f.Type != TypeSync2 && f.Type != TypeSync3 {
-		// Only a connected peer sends idle, ack or data frames. It can reach
-		// that state without ever sending SYNC3 (it went 1 -> 2 directly), so
-		// waiting for one would deadlock. The original host lacks this rule.
+	handshake := f.Type == TypeSync1 || f.Type == TypeSync2 || f.Type == TypeSync3
+	if handshake || l.state != stateS0 {
+		l.quiet = 0
+	} else if l.quiet++; !l.Strict && l.quiet >= quietUp {
+		// Waiting in state 0 for a SYNC3 that never comes: a peer that went
+		// 1 -> 2 directly sends nothing but idle or data frames from then on.
+		// The real instrument interleaves IDLE with its handshake frames, so
+		// only a long run without any handshake frame counts. The original
+		// host lacks this rule and would wait for ever.
 		l.state = stateUp
 	}
 	switch f.Type {

@@ -97,6 +97,14 @@ func (f Frame) Encode() []byte {
 	return append(b, byte(c), byte(c>>8), byte(c>>16), byte(c>>24))
 }
 
+// ValidFrames counts the frames in b that pass their CRC check. A line read at
+// the wrong baud rate yields garbage that essentially never contains one, so
+// this tells whether a capture was taken at the right rate.
+func ValidFrames(b []byte) int {
+	var d Decoder
+	return len(d.Feed(b))
+}
+
 // Decoder reassembles frames from a byte stream. Corrupt frames (bad CRC or
 // count) are dropped and counted; the decoder then hunts for the next preamble.
 type Decoder struct {

@@ -24,9 +24,9 @@ own copy of `play.exe`), and serve files. That is what `sehost` does.
 |-------|-------|
 | `.kb/.lp/.sp` decoding and encoding (`se`) | **Verified**: all 349 + 698 files re-encode byte-identically. Notes match independent MIDI renderings exactly. |
 | SE ⇄ MIDI conversion (`se2mid`, `mid2se`) | Works. The velocity curve is empirical (fitted to Zenph's paired renderings). |
-| Link protocol (`link`) | Matches the decompiled host. Tested in simulation (noise, loss, flow control, original-logic peer). **Not yet tried on the instrument.** |
-| Host (`sehost`) | Upload, console, file service. Tested end-to-end against a simulated instrument. **Not yet tried on the instrument.** |
-| Sniffer (`sesniff`) | Decodes captures and live taps. Tested on simulated traffic. |
+| Link protocol (`link`) | **Works with the real instrument** (57600 baud). Byte-identical to the original host's frames. Regression tests replay real captures from both `play.exe` and the piano. |
+| Host (`sehost`) | **Plays on the real piano** from a Raspberry Pi 4 through a PL2303 USB adapter. Rachmaninoff's Prelude in C♯ minor (3:49) ran with the piano's clock at 799.99 of 800 ticks/s, file replies within 4 ms and no link errors, and sounded right. Keystrokes not yet tried. |
+| Sniffer (`sesniff`) | Decodes captures and live taps, and finds the baud rate. Used on real `play.exe` traffic. |
 
 ## Tools
 
@@ -54,19 +54,38 @@ Add `-trace` to log frames, and `-capture run1` to save raw traffic for
 While playing: **Space** stop/resume, **Enter** quit, **Esc** restart,
 **Up/Down** restore/subdue level, **Ctrl-C** abort.
 
+## On the Raspberry Pi
+
+```bash
+sehost -probe -port /dev/ttyUSB1          # handshake only, nothing uploaded
+sehost -lines -port /dev/ttyUSB1          # modem status lines, for cabling checks
+sehost -exe play.exe -port /dev/ttyUSB1 -trace -capture run1 song   # play
+```
+
+Use the stable `/dev/serial/by-id/...` names when several adapters are
+plugged in: the `ttyUSB` numbers depend on plug-in order. The adapter goes
+straight to the piano's cable; a null-modem adapter is only needed between
+two computers.
+
 ## Next steps on real hardware
 
-1. **Read the XP registry** `HKLM\Software\SE Program Suite`, values `Port`
-   and `Baudrate`. That gives the instrument's baud rate (57600 or 28800).
-2. **Capture a known-good session.** Tap the cable between the ThinkPad and
+1. **Baud rate**: done. The instrument uses 57600. (The XP machine has no
+   `HKLM\Software\SE Program Suite` key: the programs only update that key and
+   never create it, so they auto-scan on each launch and keep no record.)
+2. **Optional: capture a ThinkPad session.** Tap the cable between the ThinkPad and
    the piano: two USB-serial adapters, receive pins on each TXD line, grounds
-   joined. Then run `sesniff -baud N -tap-pc … -tap-piano … -dump cap/`. This
-   checks the handshake, the CRC and the timing against the real firmware,
-   and `cap/pc-ch0.bin` is the exact program image.
-3. **Run `sehost -trace -capture try1`** from a Linux machine on a good
-   adapter (FTDI), then from the Pi. On the Pi, prefer the built-in UART
-   (`/dev/serial0`) through a **MAX3232 RS-232 level shifter**. Never wire the
-   Pi's 3.3 V pins straight to the RS-232 cable.
+   joined. Start `sesniff -tap-pc … -tap-piano … -dump cap/` *before*
+   launching `play` on the ThinkPad. It cycles 57600/28800 on the
+   instrument's line until frames with valid CRCs appear, then prints the
+   rate. This checks the handshake, the CRC and the timing against the real
+   firmware, and `cap/pc-ch0.bin` is the exact program image. If the
+   instrument is silent until the PC connects, the first moments may be
+   missed; rerun with `-baud` set to the printed rate.
+3. **Keys and recording**: try the keys (Space, Enter, Esc, arrows) in an
+   interactive session (`ssh -t` or tmux), and try `record.exe`. A PL2303 USB adapter
+   works. The Pi's built-in UART (`/dev/serial0`) through a **MAX3232 RS-232
+   level shifter** would remove USB entirely. Never wire the Pi's 3.3 V pins
+   straight to the RS-232 cable.
 4. Then wrap `host.Session` in a small HTTP/WebSocket service (song library,
    play/stop/level), which the iPhone app can call.
 

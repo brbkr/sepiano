@@ -40,8 +40,10 @@ func run() int {
 	trace := flag.Bool("trace", false, "log every non-idle frame to stderr")
 	capture := flag.String("capture", "", "write raw traffic to PREFIX.tx and PREFIX.rx (for sesniff)")
 	saveImg := flag.String("save-program", "", "write the extracted Z80 image to this file and exit")
+	probe := flag.Bool("probe", false, "only test the link handshake (nothing is uploaded), then exit")
+	lines := flag.Bool("lines", false, "show the port's modem status lines (CTS, DSR, DCD, RI), then exit")
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: sehost -exe play.exe -port PORT [flags] song[.kb] [arg2]\n       sehost -list")
+		fmt.Fprintln(os.Stderr, "usage: sehost -exe play.exe -port PORT [flags] song[.kb] [arg2]\n       sehost -probe -port PORT\n       sehost -list")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -56,6 +58,59 @@ func run() int {
 		}
 		return 0
 	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	var fileLog func(string, ...any)
+	opts := host.ConnectOptions{Baud: *baud, Wait: *wait}
+	if *trace {
+		opts.OnFrame = func(out bool, f link.Frame) {
+			if f.Type == link.TypeIdle {
+				return
+			}
+			dir := "<-"
+			if out {
+				dir = "->"
+			}
+			fmt.Fprintf(os.Stderr, "%s %s %v\r\n", time.Now().Format("15:04:05.000"), dir, f)
+		}
+		fileLog = func(format string, args ...any) { fmt.Fprintf(os.Stderr, "file: "+format+"\r\n", args...) }
+	}
+	if *capture != "" {
+		tx, err1 := os.Create(*capture + ".tx")
+		rx, err2 := os.Create(*capture + ".rx")
+		if err := errors.Join(err1, err2); err != nil {
+			return fail(err)
+		}
+		defer tx.Close()
+		defer rx.Close()
+		opts.RawTx, opts.RawRx = tx, rx
+	}
+
+	if *lines {
+		if *port == "" {
+			flag.Usage()
+			return 2
+		}
+		return showLines(*port)
+	}
+	if *probe {
+		if *port == "" {
+			flag.Usage()
+			return 2
+		}
+		conn, err := host.Connect(ctx, *port, opts)
+		if err != nil {
+			return fail(err)
+		}
+		// Keep the link up briefly so a trace shows the instrument settling.
+		time.Sleep(400 * time.Millisecond)
+		fmt.Printf("handshake OK on %s at %d baud (received %d bytes, %d bad frames)\n",
+			*port, conn.Baud, conn.Pump.RxBytes, conn.Pump.Decoder.Bad)
+		conn.Close()
+		return 0
+	}
+
 	prog, err := host.LoadProgram(*exe)
 	if err != nil {
 		return fail(err)
@@ -79,36 +134,9 @@ func run() int {
 		return fail(fmt.Errorf("recording does not exist: %s", se.TrimExt(song)))
 	}
 	files := host.NewFileService(song)
+	files.Log = fileLog
 	if flag.NArg() == 2 {
 		files.Arg = flag.Arg(1)
-	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-
-	opts := host.ConnectOptions{Baud: *baud, Wait: *wait}
-	if *trace {
-		opts.OnFrame = func(out bool, f link.Frame) {
-			if f.Type == link.TypeIdle {
-				return
-			}
-			dir := "<-"
-			if out {
-				dir = "->"
-			}
-			fmt.Fprintf(os.Stderr, "%s %s %v\r\n", time.Now().Format("15:04:05.000"), dir, f)
-		}
-		files.Log = func(format string, args ...any) { fmt.Fprintf(os.Stderr, "file: "+format+"\r\n", args...) }
-	}
-	if *capture != "" {
-		tx, err1 := os.Create(*capture + ".tx")
-		rx, err2 := os.Create(*capture + ".rx")
-		if err := errors.Join(err1, err2); err != nil {
-			return fail(err)
-		}
-		defer tx.Close()
-		defer rx.Close()
-		opts.RawTx, opts.RawRx = tx, rx
 	}
 
 	fmt.Fprintf(os.Stderr, "%s\n", prog.Banner)
@@ -144,6 +172,35 @@ func run() int {
 		}
 		fmt.Fprintf(os.Stderr, "\r\n%v\r\n", err)
 		return 1
+	}
+	return 0
+}
+
+// showLines reports the modem status inputs with DTR and RTS raised, as the
+// original host leaves them. A powered device on a working cable usually
+// drives some of them; a dead or unplugged line leaves them all off.
+func showLines(path string) int {
+	p, err := serial.Open(path, &serial.Mode{BaudRate: 57600})
+	if err != nil {
+		return fail(err)
+	}
+	defer p.Close()
+	show := func(label string) {
+		st, err := p.GetModemStatusBits()
+		if err != nil {
+			fmt.Println(label, err)
+			return
+		}
+		fmt.Printf("%-14s CTS=%v DSR=%v DCD=%v RI=%v\n", label, st.CTS, st.DSR, st.DCD, st.RI)
+	}
+	for _, s := range []struct {
+		label    string
+		dtr, rts bool
+	}{{"DTR+RTS on:", true, true}, {"DTR+RTS off:", false, false}, {"DTR on only:", true, false}, {"RTS on only:", false, true}} {
+		p.SetDTR(s.dtr)
+		p.SetRTS(s.rts)
+		time.Sleep(150 * time.Millisecond)
+		show(s.label)
 	}
 	return 0
 }

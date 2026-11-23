@@ -8,7 +8,11 @@
 // Live, from a passive tap: two USB serial adapters whose RX pins listen to
 // the PC's TXD and the instrument's TXD respectively (and grounds joined):
 //
-//	sesniff -baud 57600 -tap-pc /dev/ttyUSB1 -tap-piano /dev/ttyUSB2
+//	sesniff -tap-pc /dev/ttyUSB1 -tap-piano /dev/ttyUSB2
+//
+// Without -baud, the rate (57600 or 28800) is found by cycling the tap until
+// frames with valid CRCs appear, on the instrument's line when it is tapped.
+// Start sesniff before the PC program so it can lock on early.
 //
 // Prints link frames (idle frames and bare acks hidden unless -all), the
 // console text, and decoded file-service requests. -dump DIR also saves each
@@ -40,11 +44,12 @@ type side struct {
 }
 
 var (
-	all     = flag.Bool("all", false, "show idle frames and bare acknowledgements")
-	dump    = flag.String("dump", "", "directory to write per-channel payload streams")
-	mu      sync.Mutex
-	t0      = time.Now()
-	offline bool
+	all      = flag.Bool("all", false, "show idle frames and bare acknowledgements")
+	dump     = flag.String("dump", "", "directory to write per-channel payload streams")
+	mu       sync.Mutex
+	t0       = time.Now()
+	offline  bool
+	detected int
 )
 
 func main() {
@@ -52,7 +57,7 @@ func main() {
 	pianoFile := flag.String("piano", "", "capture of instrument -> PC bytes")
 	tapPC := flag.String("tap-pc", "", "serial port listening to the PC's transmit line")
 	tapPiano := flag.String("tap-piano", "", "serial port listening to the instrument's transmit line")
-	baud := flag.Int("baud", 57600, "baud rate for live taps")
+	baud := flag.Int("baud", 0, "baud rate for live taps (0 detects 57600 or 28800)")
 	flag.Parse()
 
 	pc := &side{name: "PC   ", lastSeq: -1, rpc: host.RPCDecoder{FromZ80: false}}
@@ -86,23 +91,63 @@ func main() {
 	case *tapPC != "" || *tapPiano != "":
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer cancel()
-		var wg sync.WaitGroup
+		rate := *baud
+		if rate == 0 {
+			rate = host.Bauds[0]
+		}
+		type tap struct {
+			s    *side
+			port serial.Port
+		}
+		var taps []tap
 		for _, x := range []struct {
 			s    *side
-			port string
+			path string
 		}{{pc, *tapPC}, {piano, *tapPiano}} {
-			if x.port == "" {
+			if x.path == "" {
 				continue
 			}
-			p, err := serial.Open(x.port, &serial.Mode{BaudRate: *baud})
+			p, err := serial.Open(x.path, &serial.Mode{BaudRate: rate})
 			if err != nil {
 				fail(err)
 			}
+			defer p.Close()
 			p.SetReadTimeout(20 * time.Millisecond)
+			taps = append(taps, tap{x.s, p})
+		}
+		if *baud == 0 {
+			// The instrument only ever talks at its own rate. The PC line is
+			// less reliable for this: while play.exe scans ports it sends
+			// handshake frames at 57600 even if the instrument uses 28800.
+			probe, accept, which := taps[0], afterHandshake, "PC"
+			if len(taps) == 2 || taps[0].s == piano {
+				probe, accept, which = taps[len(taps)-1], anyFrames, "instrument"
+			}
+			fmt.Fprintf(os.Stderr, "detecting baud rate on the %s line (%v)...\n", which, host.Bauds)
+			r, seen, err := detectBaud(ctx, probe.port, host.Bauds, 300*time.Millisecond, accept,
+				func(msg string) { fmt.Fprintln(os.Stderr, msg) })
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				fail(err)
+			}
+			rate = r
+			fmt.Fprintf(os.Stderr, "%s line: %d baud (pass -baud %d to skip detection next time)\n", which, rate, rate)
+			for _, t := range taps {
+				if t != probe {
+					t.port.SetMode(&serial.Mode{BaudRate: rate})
+					t.port.ResetInputBuffer()
+				}
+			}
+			feed(probe.s, seen)
+		}
+		detected = rate
+		var wg sync.WaitGroup
+		for _, t := range taps {
 			wg.Add(1)
 			go func(s *side, p serial.Port) {
 				defer wg.Done()
-				defer p.Close()
 				buf := make([]byte, 1024)
 				for ctx.Err() == nil {
 					n, err := p.Read(buf)
@@ -112,12 +157,15 @@ func main() {
 					}
 					feed(s, buf[:n])
 				}
-			}(x.s, p)
+			}(t.s, t.port)
 		}
 		wg.Wait()
 	default:
 		flag.Usage()
 		os.Exit(2)
+	}
+	if detected != 0 {
+		fmt.Printf("baud rate: %d\n", detected)
 	}
 	for _, s := range []*side{pc, piano} {
 		fmt.Printf("%s: %d frames dropped (bad CRC/length), %d stray bytes\n", s.name, s.dec.Bad, s.dec.Skipped)

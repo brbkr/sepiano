@@ -31,6 +31,7 @@ own copy of `play.exe`), and serve files. That is what `sehost` does.
 | Link protocol (`link`) | **Works with the real instrument** (57600 baud). Byte-identical to the original host's frames. Regression tests replay real captures from both `play.exe` and the piano. |
 | Host (`sehost`) | **Plays on the real piano** from a Raspberry Pi 4 through a PL2303 USB adapter. Rachmaninoff's Prelude in C♯ minor (3:49) ran with the piano's clock at 799.99 of 800 ticks/s, file replies within 4 ms and no link errors, and sounded right. Keystrokes not yet tried. |
 | Sniffer (`sesniff`) | Decodes captures and live taps, and finds the baud rate. Used on real `play.exe` traffic. |
+| Piano service (`sepianod`) | **Phase 1 built and installed on the Pi**: library, play/pause/stop/restart, level, recording, upload/download, a phone web app, all tested against a simulated piano. Its idle link to the real piano is up and clean; playing through the service still needs a check at the piano. See `docs/SERVICE-PLAN.md`. |
 
 ## Tools
 
@@ -47,6 +48,8 @@ go build -o bin/ ./cmd/...        # or: GOOS=linux GOARCH=arm64 go build -o bin-
 | `sehost -exe play.exe -port /dev/ttyUSB0 song` | play on the instrument (replaces `play.exe`) |
 | `sehost -list` | list serial ports |
 | `sesniff -pc a.bin -piano b.bin` / `-tap-pc P1 -tap-piano P2` | decode traffic |
+| `sepianod` | the piano service: API and web UI on port 80 (`-simulate` runs it without a piano) |
+| `sepianod import DIR` | add the `.kb/.lp/.sp` sets in DIR to a running service |
 
 `sehost` needs a suite executable to take the Z80 program from. It is
 installed on the XP machine. You can also unpack
@@ -90,16 +93,21 @@ two computers.
    works. The Pi's built-in UART (`/dev/serial0`) through a **MAX3232 RS-232
    level shifter** would remove USB entirely. Never wire the Pi's 3.3 V pins
    straight to the RS-232 cable.
-4. Then build the piano service proposed in `docs/SERVICE-PLAN.md`: a daemon
-   on the Pi with a song library, playback, volume and recording controls, and
-   a web UI that a phone can use, ahead of a native iPhone app.
+4. The piano service in `docs/SERVICE-PLAN.md` is built: a daemon on the Pi
+   with a song library, playback, volume and recording controls, and a web UI
+   that a phone can use (`http://raspberrypi.local/`), ahead of a native
+   iPhone app. Install or update it with `deploy/deploy.sh`. Try it without
+   the piano with `go run ./cmd/sepianod -simulate -addr 127.0.0.1:8080 -data ./devdata`.
 
 ## Layout
 
 ```
-se/     file formats, MIDI conversion       link/  frames, ARQ link, pacing pump
-smf/    tiny MIDI file reader/writer        host/  Z80 upload, file service, console
-cmd/    sedump se2mid mid2se sehost sesniff docs/  specifications
+se/      file formats, MIDI conversion       link/    frames, ARQ link, pacing pump
+smf/     tiny MIDI file reader/writer        host/    Z80 upload, file service, console
+sim/     simulated instrument                deck/    instrument controller (sepianod)
+library/ performance store (sepianod)        api/     REST + SSE, openapi.yaml
+web/     phone web app (no build step)       deploy/  systemd, udev, avahi, install scripts
+cmd/     sedump se2mid mid2se sehost sesniff sepianod             docs/  specifications
 ```
 
 `go test ./...` runs the unit tests. The corpus tests read the recordings in

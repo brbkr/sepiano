@@ -1,0 +1,8 @@
+# The USB serial adapter wired to the piano appears as /dev/sepiano-piano,
+# whatever ttyUSB number it gets. It is a Prolific PL2303 (067b:2303), the
+# only one on the Pi; the Keyspan adapter for the old ThinkPad is left alone.
+#
+# If a second PL2303 is ever added, match the USB port instead, e.g.
+#   ENV{ID_PATH}=="platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.3:1.0"
+# (see `udevadm info -q property -n /dev/ttyUSB1`).
+SUBSYSTEM=="tty", ATTRS{idVendor}=="067b", ATTRS{idProduct}=="2303", SYMLINK+="sepiano-piano", GROUP="dialout", MODE="0660"

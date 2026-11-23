@@ -1,8 +1,11 @@
-# Proposed piano service
+# Piano service
 
-**Status: proposal.** Nothing here is built yet. It's a starting point for the
-piano's owner to change. The early decisions are listed below so they can be
-revisited.
+**Status: Phase 1 built.** `sepianod` (playback, level, recording, library,
+API, web UI, deployment) is written, tested against the simulated piano and
+installed on the Pi. It has played full pieces on the real piano from a
+phone, with stop and the level confirmed; pause, restart, recording and power
+cycles are still to check at the piano. See "What is built" at the end. The
+decisions below stay open to the piano's owner.
 
 ## Goal
 
@@ -24,6 +27,9 @@ It needs a web UI first, and an iPhone app later.
 |----------|--------|-----|
 | Where it lives | One daemon, `sepianod`, in this repo | It owns the serial port and serves the API and web UI from one static binary, so the API and UI change together. |
 | Web UI | First pass, as a mobile-first PWA | It's the only way to use the piano without SSH. "Add to Home Screen" gives an iPhone app right away, and it proves the API. |
+| Web UI toolchain | Plain HTML, CSS and JavaScript modules, no build step, embedded in the binary | *Changed from Vite + Preact + TypeScript.* Seven screens don't need a framework, and the project stays Go-only: no Node on the development machine, nothing to rebuild before `go build`. |
+| Library index | In memory, rebuilt from the per-piece `.json` files at start | *Changed from SQLite.* About 350 pieces fit in memory; the files were already the source of truth, so there is no database to corrupt on a power cut and no extra dependency. Revisit if search or history outgrow it. |
+| Link per piece | A fresh connection for each piece or recording; a link held open while idle | *Settled ahead of Phase 0 question 3.* Closing and reopening is the sequence already proven on the piano, and it avoids a real problem with reusing a link: the previous session's channel readers stay blocked and would steal the next session's data. |
 | iPhone app | Later, in a separate repo (`sepiano-ios`, SwiftUI) | Different toolchain and release cycle. It talks to the daemon through a checked-in OpenAPI spec. Build it once the PWA shows which native features matter (lock screen, Siri/Shortcuts, widgets). |
 | How playback is controlled | Drive Stahnke's own Z80 player and recorder | Every control maps onto a key those programs already understand, and their console text confirms each state change. Nothing is reimplemented on the Z80. |
 | Access | Home LAN only, no login | Simplest. Destructive actions get confirmations in the UI. |
@@ -45,7 +51,7 @@ It needs a web UI first, and an iPhone app later.
                                 ├─ api/      REST /api/v1 + SSE /api/v1/events, serves web/dist
                                 ├─ deck/     one actor goroutine: serial port, sessions, state machine
                                 │             └─ host.Connect / host.Session / host.FileService (existing)
-                                ├─ library/  SQLite index + file store (+ se package for parse/convert)
+                                ├─ library/  file store + in-memory index (+ se package for parse/convert)
                                 └─ sim/      fake instrument for development without the piano
 ```
 
@@ -88,34 +94,38 @@ It needs a web UI first, and an iPhone app later.
   a new piece. "KEYBOARD INTERLOCK FAILURE" becomes a Fault with its text.
 - **Link lifetime.** Keep the link up while idle, so the UI shows
   Online/Offline at once and a piano power cycle is noticed (`link.ErrSilent`
-  starts a reconnect loop). Run one session per piece on the open link if the
-  Phase 0 spike shows the firmware accepts a new upload; otherwise reconnect
-  per piece (already proven, about 2.5 s to the first note).
+  starts a reconnect loop). Each piece closes the idle link and opens a fresh
+  one for the upload (already proven, about 2.5 s to the first note). Running
+  several sessions on one open link would first need `host.Session` to stop
+  its channel readers when it ends: today they stay blocked in `Link.Read`
+  until the link fails, and would take the next session's bytes.
 
 ### Library
 
-- **Files are the source of truth; SQLite is the index.**
+- **Files are the source of truth; the index lives in memory.**
   - Each piece is stored as `/var/lib/sepiano/library/<id>.{kb,lp,sp}` plus
-    `<id>.json` metadata. `<id>` is 8 characters, because the Z80 rejects
-    longer names if it asks for one.
-  - The database can be rebuilt by rescanning the folder.
-  - Writes go to a temp file, then fsync and rename. SQLite runs in WAL mode
-    with `synchronous=FULL`, using pure-Go `modernc.org/sqlite`, so the
-    cross-compile stays static.
-- **Schema:**
-  - `pieces`: id, title, composer, performer, recorded_on, instrument,
-    perf_key, duration_ms, notes, origin (import | upload | midi | recorded),
-    kb_sha256, added_at
-  - `playlists`, `playlist_items`, `plays` (history), `settings`
+    `<id>.json` metadata (and `<id>.mid` for converted MIDI files). `<id>` is
+    8 characters, because the Z80 rejects longer names if it asks for one.
+  - The index is rebuilt from the folder at start and on `POST
+    /library/rescan`. Sets copied in by hand get an id and metadata; a
+    missing `.json` is rebuilt from the `.kb`.
+  - Writes go to a temp file, then fsync and rename (and fsync the folder).
+    The `.json` is written last.
+  - Settings (preferred instrument, level) are in
+    `/var/lib/sepiano/settings.json`.
+- **Piece fields:** id, title, composer, performer, recorded_on, instrument,
+  perf_key, duration_ms, notes, origin (import | upload | midi | recorded),
+  source_name, header_text, kb_sha256, has_midi_source, added_at.
 - **Metadata** is parsed from the Zenph naming convention, e.g.
   `02-Rachmaninoff19280404-Rachmaninoff_PreludeOp3_2-Steinway_SED133291`,
   falling back to the `.kb` header text. Fields are editable.
 - **Renderings.** `perf_key` (performer + date + work) groups the renderings
   of one performance. The default rendering comes from the
   `settings.preferred_instrument` setting.
-- **Import:** `sepianod import <dir>` scans for `.kb/.lp/.sp` sets, validates
-  them with `se.Load`, and dedupes by hash. It also turns the `.bat` files into
-  playlists.
+- **Import:** `sepianod import <dir>` scans for `.kb/.lp/.sp` sets and uploads
+  them to the running service, which validates them and dedupes by the `.kb`
+  hash (`-data DIR` writes straight into a stopped service's folder). Turning
+  the `.bat` files into playlists comes with playlists, in phase 2.
 - **Upload** accepts a `.kb/.lp/.sp` set, a `.zip` of sets, or a `.mid`
   (converted with `se.FromMIDI`, original kept).
 - **Download** offers:
@@ -128,49 +138,61 @@ It needs a web UI first, and an iPhone app later.
 | Area | Endpoints |
 |------|-----------|
 | Live state | `GET /status`; `GET /events` (SSE: state, position, level, console, library-changed) |
-| Playback | `POST /deck/play {piece \| playlist}`, `/deck/pause`, `/deck/resume`, `/deck/stop`, `/deck/restart`, `/deck/level {delta \| level}` |
+| Playback | `POST /deck/play {piece}`, `/deck/pause`, `/deck/resume`, `/deck/stop`, `/deck/restart`, `/deck/level {delta \| level}` |
 | Recording | `POST /record/arm {title}`, `/record/start`, `/record/stop`, `/record/discard` |
-| Library | `GET /pieces?q=&composer=&performer=&instrument=`, `GET/PATCH/DELETE /pieces/{id}`, `POST /pieces` (multipart), `GET /pieces/{id}/download?format=se\|midi`, `GET /export` |
-| Lists | `/playlists` CRUD, `GET/PUT /queue` |
-| Instrument | `GET /instrument` (port, baud, link stats, program banners), `PUT /programs/{play\|record}` (upload the .exe) |
+| Library | `GET /pieces?q=&composer=&performer=&instrument=`, `GET/PATCH/DELETE /pieces/{id}`, `POST /pieces` (multipart), `GET /pieces/{id}/download?format=se\|midi`, `GET /export`, `POST /library/rescan` |
+| Lists (phase 2) | `/playlists` CRUD, `GET/PUT /queue`, `play {playlist}` |
+| Instrument | `GET /instrument` (port, baud, link stats, program banners, recent console lines), `PUT /programs/{play\|record}` (upload the .exe) |
+| Settings | `GET/PUT /settings` (preferred instrument, level) |
+| Simulator | `POST /sim/power {on}`, only with `-simulate` |
 
 The API uses the stdlib `net/http` with Go 1.22 method routes. It sends SSE
 rather than WebSockets: it's stdlib-only, `EventSource` reconnects by itself,
 and iOS can read it.
 
-### Web UI (`web/`, Vite + Preact + TypeScript, built output embedded)
+### Web UI (`web/`, plain HTML/CSS/JavaScript, embedded as is)
 
 The screens:
 - **Now Playing:** title and performer, a progress bar from the piano clock,
   pause/stop/restart, and level −/+ with a readout.
 - **Library:** search, filters, renderings grouped together.
-- **Piece:** play, queue, download as SE or MIDI, edit, delete.
-- **Playlists / Queue.**
+- **Piece:** play, download as SE or MIDI, edit, delete (queue: phase 2).
+- **Playlists / Queue:** phase 2.
 - **Record:** arm → start → stop → name it.
 - **Upload.**
 - **Status & Settings:** link health, programs, preferred instrument, backup.
 
-Node is needed on the development machine only; the Pi gets one binary.
+There is no build step and no Node: edit the files and rebuild `sepianod`. The
+UI loads nothing from the internet, so it works on a home network without
+one. The Pi gets one binary.
 
 ### Running hidden in the piano
 
 - **systemd unit** `sepianod.service`:
   - runs as a dedicated `sepiano` user in group `dialout`, with
     `Restart=always`;
-  - gets `CAP_NET_BIND_SERVICE` so the UI lives at `http://piano.local/`. The
-    hostname comes through mDNS/avahi, which needs no DNS changes.
+  - gets `CAP_NET_BIND_SERVICE` so the UI lives on port 80, at
+    `http://<hostname>.local/` through mDNS/avahi, which needs no DNS changes.
+    The Pi is still called `raspberrypi`; renaming it `piano`
+    (`sudo hostnamectl set-hostname piano`, then reboot) would give
+    `http://piano.local/`.
 - **Discovery:** an avahi service file advertises `_http._tcp` and
   `_sepiano._tcp`, for the iOS app's Bonjour discovery later.
 - **Stable port:** a udev rule creates `/dev/sepiano-piano`, matching the
-  PL2303 by USB path, because `ttyUSB` numbers change with plug order.
+  PL2303 by its USB ids (067b:2303), because `ttyUSB` numbers change with plug
+  order. It is the only PL2303 on the Pi; the rule notes how to match the USB
+  port instead if that changes.
 - **Programs:** `play.exe` and `record.exe` live in
   `/var/lib/sepiano/programs` and are never in git. They're uploaded once via
-  the API or scp.
-- **Sudden power loss:** besides the atomic-write and SQLite measures above,
-  phase 2 can switch on Raspberry Pi OS's overlay (read-only) root, with data
-  on a separate writable partition.
-- **Deploy:** `make deploy` cross-compiles (`GOOS=linux GOARCH=arm64`), copies
-  over SSH, and restarts the unit.
+  the Status page (`PUT /programs/…`) or copied there.
+- **The service owns the serial port.** Stop it (`sudo systemctl stop
+  sepianod`) before using `sehost` by hand, and start it again afterwards.
+- **Sudden power loss:** besides the atomic writes above, phase 2 can switch
+  on Raspberry Pi OS's overlay (read-only) root, with data on a separate
+  writable partition.
+- **Deploy:** `deploy/deploy.sh` (or `make deploy`) cross-compiles
+  (`GOOS=linux GOARCH=arm64`), copies over SSH, and runs `deploy/install.sh`
+  with sudo: user, binary, unit, udev rule, avahi file, restart.
 
 ## Phases
 
@@ -178,13 +200,15 @@ Node is needed on the development machine only; the Pi gets one binary.
 interactive session (tmux or `ssh -t`). Someone has to be at the piano to watch
 and listen. Each answer changes deck details:
 1. Do Space, Enter, Esc and Up/Down work, and what does each print?
+   *(Enter and Down: yes, see "What is built".)*
 2. How low does the level go, and does it persist across songs?
+   *(−16; each upload starts at 0.)*
 3. Does a second upload on a link that is still up start a new program?
 4. Run `record.exe` end to end: what files does it write, and does it ask for
    the name?
 5. What happens on the link when the piano is power-cycled?
 
-**Phase 1 — a usable piano service** (milestones in this order):
+**Phase 1 — a usable piano service** (built; milestones in this order):
 1. `sim/`: a fake instrument with an echoing handshake, the real prompt
    strings, an 800 Hz clock, key reactions, and file reads through the file
    service. Grown from `fakeZ80` in `host/host_test.go`.
@@ -210,24 +234,26 @@ remote access if it's ever wanted.
 ## Files
 
 New:
-- `cmd/sepianod/main.go`
+- `cmd/sepianod/main.go` (the daemon, `-simulate`, `import`, `version`)
 - `deck/deck.go`, `deck/console.go` (console text → events), `deck/deck_test.go`
 - `sim/sim.go`
-- `library/store.go`, `library/files.go`, `library/names.go`, `library/import.go`
-- `api/server.go`, `api/sse.go`, `api/openapi.yaml`
-- `web/…`, `web/embed.go`
-- `deploy/sepianod.service`, `deploy/sepiano-avahi.service`, `deploy/99-sepiano.rules`
+- `library/store.go`, `library/files.go`, `library/names.go`, `library/library_test.go`
+- `api/server.go` (REST and SSE), `api/programs.go`, `api/icon.go`, `api/openapi.yaml`, `api/server_test.go`
+- `web/index.html`, `web/app.js`, `web/style.css`, `web/sw.js`, `web/manifest.webmanifest`, `web/icon.svg`, `web/embed.go`
+- `deploy/sepianod.service`, `deploy/sepiano.avahi.service`, `deploy/99-sepiano.rules`, `deploy/install.sh`, `deploy/deploy.sh`
 - `Makefile`
 
-Reused unchanged:
-- `host.Connect`, `host.Session`, `host.FileService`, `host.LoadProgram` and the
-  key codes (`host/`);
-- `link.Pump.OnFrame` and `link.ErrSilent` (`link/`);
-- `se.Load`, `se.ParseKB`, `Performance.ToMIDI`, `se.FromMIDI` and
-  `Performance.Save` (`se/`).
+Reused unchanged: `host.Session`, `host.FileService`, `host.LoadProgram`, the
+key codes, `link.Pump.OnFrame`, `link.ErrSilent`, `se.ParseKB`,
+`Performance.ToMIDI` and `se.FromMIDI`.
 
-Likely small changes: running several `Session`s on one `Conn` (it already
-takes a link), and pointing `FileService` at library names.
+Small additions to existing packages:
+- `host.ConnectOn` runs the link over any open port (the simulator's cable);
+  `host.Connect` uses it and behaves as before.
+- `link.Pump.Stamp` lets the simulator send its clock in `ts`;
+  `link.Link.Stats` reads the counters safely; the simulated cable can be
+  closed.
+- `se.Performance.Encode` returns the bytes `Save` writes (`Save` uses it).
 
 ## Verification
 
@@ -236,15 +262,72 @@ takes a link), and pointing `FileService` at library names.
   - end of performance;
   - recording produces files that `se.Load` accepts;
   - a link drop moves the deck to Offline, then recovery.
-  Library tests: import the corpus, the Zenph name parser, the upload and
-  download round trip (bytes identical; the MIDI round trip uses the existing
-  tests' tolerance), and rebuilding the DB from files.
+  Library tests: the Zenph name parser, the upload and download round trip
+  (bytes identical), MIDI conversion, zips, and rebuilding the index from
+  files.
 - **Without the piano:** `sepianod -simulate` plus the web UI in a browser;
   check every control and live progress.
-- **On the piano:** deploy to the Pi, open `http://piano.local` on a phone,
-  then:
+- **On the piano:** deploy to the Pi, open `http://raspberrypi.local` on a
+  phone, then:
   1. play a known piece and pause, resume, change the level, stop;
   2. upload a MIDI file and play it;
   3. download a piece as MIDI;
   4. record a short phrase and play it back;
   5. power-cycle the piano while idle: the UI should show Offline, then recover.
+
+## What is built
+
+Phase 1, as of the second working session:
+
+- **Simulated piano** (`sim/`): speaks the real link protocol over a
+  simulated cable, recognises the uploaded program by its banner, plays the
+  part of the player (console text, file reads, keys, level, 800 Hz clock in
+  `ts`) or the recorder (prompts, writes through the file service), and can be
+  switched off and on. `sepianod -simulate` uses placeholder programs, so no
+  copyrighted file is needed to develop.
+- **Deck** (`deck/`): one goroutine owns the link. States, confirmations from
+  the console, the level stepped one key at a time (the lowest level is found
+  when Down stops changing it, then remembered), position from the piano's
+  clock, a fresh connection per piece, an idle link for Online/Offline,
+  reconnects with back-off, recordings imported when the recorder finishes.
+- **Library** (`library/`), **API** (`api/`, with `openapi.yaml`) and **web
+  UI** (`web/`): as described above.
+- **Deployment** (`deploy/`): installed on the Pi with `deploy/deploy.sh`.
+  The idle link to the piano comes up at once and runs clean.
+
+Tests: `go test ./...` covers the deck against the simulator (play, pause,
+resume, level, restart, stop, end of performance, switching pieces, the
+level floor, recording, discard, interlock failure, power cuts idle and while
+playing), the library (names, round trips, zips, MIDI, rebuild, settings,
+export) and the API end to end.
+
+**On the real piano** (through the service, driven from a phone):
+
+- Rachmaninoff's Prelude and a second piece played; progress followed the
+  piano's clock.
+- **Enter** stops: the player prints "QUIT PLAYING", then ends the session.
+- **Down** subdues: "LEVEL=-1" … "LEVEL=-16". **The lowest level is −16**;
+  Down at −16 prints nothing, and the deck takes the silence as the floor.
+- Each upload starts at "LEVEL=0 (NORMAL)" (seen at every program start).
+- Two bugs the simulator could not show, both fixed: a new connection could
+  open the serial port before the previous one had closed ("Serial port
+  busy"), and a link that went silent was dropped without closing the port,
+  which would have kept the service offline after a piano power cycle. The
+  simulated cable is now exclusive like a real port, so the tests cover both.
+
+**Assumptions still to check at the piano** (Phase 0), each a small change in
+`deck/console.go` or `sim/sim.go` if the piano differs:
+
+- the exact text after Space and Esc ("STOP PLAYING AT TIME=…",
+  "RESUME PLAYING", "RESTART PERFORMANCE");
+- whether a level set during one piece carries into the next upload (the
+  deck re-applies the remembered level either way);
+- the recorder: that it uses the command-line name and the `.kb$` →
+  `.kb` commit, and prints "DEPRESS ENTER TO END RECORDING" once recording
+  (if not, the deck still moves to Recording after 3 s and says so);
+- `record.exe` is not on the Pi yet: install it from the Status page (it is
+  inside `se_program_suite_v0.95_setup.exe`; unpack it with 7-Zip);
+- a piano power cycle while idle and while playing.
+
+**Not built yet:** queue and playlists (and `.bat` import), play history,
+seeking, the louder-than-recorded trim, the overlay root, the iOS app.

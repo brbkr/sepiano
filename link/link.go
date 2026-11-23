@@ -115,6 +115,13 @@ func (l *Link) Err() error {
 	return l.err
 }
 
+// Stats returns the retransmission and NAK counters, safely while the link runs.
+func (l *Link) Stats() (retransmits, naks int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.Retransmits, l.Naks
+}
+
 // Fail stops the link; blocked readers and writers return err.
 func (l *Link) Fail(err error) {
 	l.mu.Lock()

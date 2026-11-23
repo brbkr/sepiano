@@ -1,0 +1,409 @@
+openapi: 3.1.0
+info:
+  title: sepiano piano service
+  version: "1"
+  description: |
+    The API of `sepianod`, the service that drives a Stahnke SE reproducing
+    piano from a Raspberry Pi. The web UI and the future iOS app both use it.
+
+    * Home network only, no authentication.
+    * JSON in and out unless noted. Errors are `{"error": "..."}` with a 4xx/5xx
+      status.
+    * Live state comes from `GET /events` (Server-Sent Events). Clients should
+      render from the `status` events and use the POST replies only to report
+      errors.
+servers:
+  - url: /api/v1
+
+paths:
+  /status:
+    get:
+      summary: Current deck state
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Status" } } } }
+
+  /events:
+    get:
+      summary: Live updates (Server-Sent Events)
+      description: |
+        `text/event-stream`. The first event is always a `status`. Event types:
+
+        * `status`: data is a Status object. Sent on every change, and about
+          5 times a second while the position moves.
+        * `console`: data is `{"line": "..."}`, one line of text the piano's
+          program printed.
+        * `library`: data is `{"id": "..."}` (empty id = many changes). The
+          library changed; refetch what you show.
+        * `notice`: data is `{"level": "info"|"warn"|"error", "text": "..."}`,
+          a message worth showing briefly (e.g. "recording saved").
+
+        A comment line (`: ping`) is sent every 15 s to keep proxies awake.
+      responses:
+        "200": { description: Event stream, content: { text/event-stream: {} } }
+
+  /deck/play:
+    post:
+      summary: Play a piece
+      description: |
+        Starts the piece. If something is already playing it is stopped first.
+        Returns at once (202) with the deck in `loading`; follow progress on
+        `/events`. The upload of the player program takes about 2 s.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [piece], properties: { piece: { type: string, description: Piece id } } } } }
+      responses:
+        "202": { $ref: "#/components/responses/Status" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { description: Piano offline or player program missing, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /deck/pause:
+    post:
+      summary: Pause (the player's Space key)
+      description: Waits until the piano confirms ("STOP PLAYING AT TIME=…").
+      responses:
+        "200": { $ref: "#/components/responses/Status" }
+        "409": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/Error" }
+  /deck/resume:
+    post:
+      summary: Resume after a pause (Space again)
+      responses:
+        "200": { $ref: "#/components/responses/Status" }
+        "409": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/Error" }
+  /deck/stop:
+    post:
+      summary: Stop playing (the player's Enter key)
+      description: If the piano does not confirm, the service drops the link, which also stops the program.
+      responses:
+        "200": { $ref: "#/components/responses/Status" }
+        "409": { $ref: "#/components/responses/Error" }
+  /deck/restart:
+    post:
+      summary: Restart the piece from the beginning (the player's Esc key)
+      responses:
+        "200": { $ref: "#/components/responses/Status" }
+        "409": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/Error" }
+  /deck/level:
+    post:
+      summary: Change the volume level
+      description: |
+        The level is the player's own "subdue" setting: 0 plays as recorded,
+        -1, -2, … play softer. It cannot go above 0. Give either `delta`
+        (usually +1 or -1) or an absolute `level`. Works while idle too: the
+        level is applied when the next piece starts, and it is remembered.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                delta: { type: integer }
+                level: { type: integer, maximum: 0 }
+      responses:
+        "200": { $ref: "#/components/responses/Status" }
+        "400": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/Error" }
+
+  /record/arm:
+    post:
+      summary: Prepare to record
+      description: |
+        Uploads the recorder program. The deck goes `loading`, then `armed`
+        when the piano is ready. Recording starts with `/record/start`.
+      requestBody:
+        content: { application/json: { schema: { type: object, properties: { title: { type: string } } } } }
+      responses:
+        "202": { $ref: "#/components/responses/Status" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /record/start:
+    post:
+      summary: Start recording (Space)
+      responses:
+        "200": { $ref: "#/components/responses/Status" }
+        "409": { $ref: "#/components/responses/Error" }
+  /record/stop:
+    post:
+      summary: Stop recording and save (Enter)
+      description: The deck goes `saving`, then `idle`. A `library` event and a `notice` announce the new piece.
+      responses:
+        "200": { $ref: "#/components/responses/Status" }
+        "409": { $ref: "#/components/responses/Error" }
+  /record/discard:
+    post:
+      summary: Abandon an armed or running recording without saving
+      responses:
+        "200": { $ref: "#/components/responses/Status" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /pieces:
+    get:
+      summary: List the library
+      parameters:
+        - { name: q, in: query, schema: { type: string }, description: Words to match in title, composer, performer, notes and file name }
+        - { name: composer, in: query, schema: { type: string } }
+        - { name: performer, in: query, schema: { type: string } }
+        - { name: instrument, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pieces: { type: array, items: { $ref: "#/components/schemas/Piece" } }
+    post:
+      summary: Upload pieces
+      description: |
+        `multipart/form-data` with one or more `file` parts. Accepted:
+        a `.kb` + `.lp` + `.sp` set (same base name), a `.zip` of sets, or a
+        `.mid`/`.midi` file (converted; the original is kept). An optional
+        `title` field names a single MIDI upload.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file: { type: array, items: { type: string, format: binary } }
+                title: { type: string }
+      responses:
+        "200":
+          description: Result per item
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  added: { type: array, items: { $ref: "#/components/schemas/Piece" } }
+                  duplicates: { type: array, items: { $ref: "#/components/schemas/Piece" }, description: Already in the library (same .kb contents) }
+                  errors: { type: array, items: { type: object, properties: { name: { type: string }, error: { type: string } } } }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /pieces/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      summary: One piece
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Piece" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      summary: Edit metadata
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Any subset of these fields.
+              properties:
+                title: { type: string }
+                composer: { type: string }
+                performer: { type: string }
+                recorded_on: { type: string }
+                instrument: { type: string }
+                notes: { type: string }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Piece" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Delete a piece and its files
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { description: The piece is playing, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /pieces/{id}/download:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+      - { name: format, in: query, schema: { type: string, enum: [se, midi], default: se } }
+    get:
+      summary: Download a piece
+      description: "`se`: a .zip holding the .kb/.lp/.sp set under its original name. `midi`: a Standard MIDI File."
+      responses:
+        "200": { description: File, content: { application/zip: {}, audio/midi: {} } }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /export:
+    get:
+      summary: Back up the whole library as one .zip
+      responses:
+        "200": { description: Zip, content: { application/zip: {} } }
+
+  /library/rescan:
+    post:
+      summary: Re-read the library folder (after files were copied in by hand)
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object, properties: { pieces: { type: integer } } } } } }
+
+  /instrument:
+    get:
+      summary: Connection details and diagnostics
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Instrument" } } } }
+
+  /programs/{name}:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string, enum: [play, record] } }
+    put:
+      summary: Install a suite program (play.exe or record.exe)
+      description: |
+        The body is the .exe itself (`application/octet-stream`), or
+        `multipart/form-data` with a `file` part. The Z80 program inside is
+        checked before the file is kept. These programs are copyrighted and are
+        never part of sepiano: each owner supplies their own copy.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream: {}
+          multipart/form-data: { schema: { type: object, properties: { file: { type: string, format: binary } } } }
+      responses:
+        "200": { description: Installed, content: { application/json: { schema: { $ref: "#/components/schemas/Program" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /settings:
+    get:
+      summary: Settings
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Settings" } } } }
+    put:
+      summary: Change settings (fields left out are kept)
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/Settings" } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Settings" } } } }
+
+  /sim/power:
+    post:
+      summary: "Simulator only: switch the simulated piano on or off"
+      description: Exists only when the service runs with `-simulate`.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [on], properties: { on: { type: boolean } } } } }
+      responses:
+        "200": { description: OK }
+        "404": { description: Not running the simulator }
+
+components:
+  responses:
+    Status:
+      description: The deck state after the command
+      content: { application/json: { schema: { $ref: "#/components/schemas/Status" } } }
+    Error:
+      description: Error
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+
+    State:
+      type: string
+      description: |
+        * `offline`: the piano does not answer (power off, cable). The service keeps retrying.
+        * `connecting`: opening the link.
+        * `idle`: connected, nothing running.
+        * `loading`: uploading a program to the piano (about 2 s).
+        * `playing`, `paused`
+        * `stopping`: stop requested, waiting for the program to finish.
+        * `armed`: recorder loaded, waiting for `/record/start`.
+        * `recording`
+        * `saving`: recording stopped, files being written.
+        * `fault`: something went wrong; `message` says what. The service recovers by itself.
+      enum: [offline, connecting, idle, loading, playing, paused, stopping, armed, recording, saving, fault]
+
+    Status:
+      type: object
+      required: [state, online, position_ms, duration_ms, level, target_level, since]
+      properties:
+        state: { $ref: "#/components/schemas/State" }
+        online: { type: boolean, description: The link to the piano is up }
+        piece:
+          description: What is loaded or playing; null when idle
+          oneOf: [{ type: "null" }, { $ref: "#/components/schemas/PieceRef" }]
+        position_ms: { type: integer, description: Position from the piano's own 800 Hz clock }
+        duration_ms: { type: integer }
+        level: { type: integer, description: The level the player last reported (0 = as recorded) }
+        target_level: { type: integer, description: The level the service applies at the start of each piece }
+        min_level: { type: [integer, "null"], description: Lowest level the player accepts, once discovered }
+        message: { type: string, description: Fault or warning text, empty when all is well }
+        recording_title: { type: string, description: Title for the recording in progress }
+        program: { type: string, description: Banner of the program running on the piano }
+        simulated: { type: boolean, description: True when talking to the built-in simulator }
+        since: { type: string, format: date-time, description: When the state last changed }
+
+    PieceRef:
+      type: object
+      properties:
+        id: { type: string }
+        title: { type: string }
+        composer: { type: string }
+        performer: { type: string }
+
+    Piece:
+      type: object
+      required: [id, title, duration_ms, origin, added_at]
+      properties:
+        id: { type: string, description: "8 characters; also the base name of the files on the Pi" }
+        title: { type: string }
+        composer: { type: string }
+        performer: { type: string }
+        recorded_on: { type: string, description: "YYYY-MM-DD when known" }
+        instrument: { type: string, description: "Rendering instrument, e.g. Steinway_SED133291" }
+        perf_key: { type: string, description: "Same value for every rendering of one performance; group by it" }
+        duration_ms: { type: integer }
+        notes: { type: string }
+        origin: { type: string, enum: [import, upload, midi, recorded] }
+        source_name: { type: string, description: The original file base name }
+        header_text: { type: string, description: Text stored in the .kb header (often a copyright line) }
+        kb_sha256: { type: string }
+        has_midi_source: { type: boolean, description: The piece was converted from an uploaded MIDI file, which is kept }
+        added_at: { type: string, format: date-time }
+
+    Settings:
+      type: object
+      properties:
+        preferred_instrument: { type: string, description: "Rendering to prefer when a performance has several" }
+        level: { type: integer, maximum: 0, description: "Default level (same as target_level)" }
+
+    Program:
+      type: object
+      properties:
+        present: { type: boolean }
+        banner: { type: string }
+        error: { type: string }
+
+    Instrument:
+      type: object
+      properties:
+        port: { type: string }
+        baud: { type: integer }
+        online: { type: boolean }
+        simulated: { type: boolean }
+        link:
+          type: object
+          properties:
+            rx_bytes: { type: integer }
+            tx_bytes: { type: integer }
+            retransmits: { type: integer }
+            naks: { type: integer }
+            connected_since: { type: [string, "null"], format: date-time }
+            last_error: { type: string }
+        programs:
+          type: object
+          properties:
+            play: { $ref: "#/components/schemas/Program" }
+            record: { $ref: "#/components/schemas/Program" }
+        console: { type: array, items: { type: string }, description: The last lines the piano's program printed }
+        version: { type: string }

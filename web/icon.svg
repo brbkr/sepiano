@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>Piano</title>
+  <defs>
+    <linearGradient id="ebony" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2c2621"/>
+      <stop offset="1" stop-color="#13110e"/>
+    </linearGradient>
+    <linearGradient id="ivory" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fcf7ec"/>
+      <stop offset="1" stop-color="#e8ddc8"/>
+    </linearGradient>
+    <linearGradient id="brass" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#b3843a"/>
+      <stop offset="0.5" stop-color="#e4c07a"/>
+      <stop offset="1" stop-color="#b3843a"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#ebony)"/>
+  <rect x="99" y="140" width="314" height="14" rx="7" fill="url(#brass)"/>
+  <g fill="url(#ivory)">
+    <rect x="99" y="172" width="58" height="208" rx="10"/>
+    <rect x="163" y="172" width="58" height="208" rx="10"/>
+    <rect x="227" y="172" width="58" height="208" rx="10"/>
+    <rect x="291" y="172" width="58" height="208" rx="10"/>
+    <rect x="355" y="172" width="58" height="208" rx="10"/>
+  </g>
+  <g fill="#15120f">
+    <rect x="141" y="166" width="38" height="128" rx="7"/>
+    <rect x="205" y="166" width="38" height="128" rx="7"/>
+    <rect x="333" y="166" width="38" height="128" rx="7"/>
+  </g>
+</svg>

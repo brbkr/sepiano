@@ -1,0 +1,33 @@
+[Unit]
+Description=sepiano piano service
+Documentation=https://github.com/brbkr/sepiano/blob/main/docs/SERVICE-PLAN.md
+After=network.target
+
+[Service]
+Type=simple
+User=sepiano
+Group=sepiano
+SupplementaryGroups=dialout
+ExecStart=/usr/local/bin/sepianod -addr :80 -data /var/lib/sepiano -port /dev/sepiano-piano
+Restart=always
+RestartSec=2
+
+# /var/lib/sepiano: library, programs (play.exe, record.exe), settings.
+StateDirectory=sepiano
+StateDirectoryMode=0755
+
+# Port 80 without root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

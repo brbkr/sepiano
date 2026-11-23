@@ -15,13 +15,29 @@ import (
 // Baud rates the PC host tries, in order, when none is configured.
 var Bauds = []int{57600, 28800}
 
+// Port is an open connection to the instrument: a serial port, or one end of
+// a simulated cable. Reads must time out briefly rather than block (see
+// link.Port).
+type Port interface {
+	link.Port
+	Close() error
+}
+
+// modemPort is the part of serial.Port that controls the modem lines.
+type modemPort interface {
+	SetDTR(bool) error
+	SetRTS(bool) error
+	ResetInputBuffer() error
+	ResetOutputBuffer() error
+}
+
 // Conn is an open serial connection with a running link.
 type Conn struct {
 	Link *link.Link
 	Pump *link.Pump
 	Baud int
 
-	port   serial.Port
+	port   Port
 	stop   context.CancelFunc
 	exited chan struct{}
 	err    error
@@ -35,6 +51,9 @@ type ConnectOptions struct {
 	RawRx   io.Writer
 	RawTx   io.Writer
 }
+
+// ErrNoResponse means the instrument did not answer the handshake.
+var ErrNoResponse = errors.New("no response from instrument")
 
 // Connect opens the serial port and completes the link handshake.
 func Connect(ctx context.Context, path string, o ConnectOptions) (*Conn, error) {
@@ -67,7 +86,21 @@ func dial(ctx context.Context, path string, baud int, o ConnectOptions) (*Conn, 
 	port.SetReadTimeout(5 * time.Millisecond)
 	port.ResetInputBuffer()
 	port.ResetOutputBuffer()
+	c, err := ConnectOn(ctx, port, baud, o)
+	if errors.Is(err, ErrNoResponse) {
+		return nil, fmt.Errorf("%w on %s at %d baud", ErrNoResponse, path, baud)
+	} else if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return c, nil
+}
 
+// ConnectOn completes the link handshake over an already open port, such as
+// one end of a simulated cable. The port is closed if the handshake fails.
+func ConnectOn(ctx context.Context, port Port, baud int, o ConnectOptions) (*Conn, error) {
+	if o.Wait == 0 {
+		o.Wait = 250 * time.Millisecond
+	}
 	l := link.New()
 	p := &link.Pump{L: l, Port: port, Baud: baud, OnFrame: o.OnFrame, RawRx: o.RawRx, RawTx: o.RawTx}
 	pctx, stop := context.WithCancel(ctx)
@@ -80,7 +113,7 @@ func dial(ctx context.Context, path string, baud int, o ConnectOptions) (*Conn, 
 		select {
 		case <-deadline:
 			c.Close()
-			return nil, fmt.Errorf("no response from instrument on %s at %d baud", path, baud)
+			return nil, fmt.Errorf("%w at %d baud", ErrNoResponse, baud)
 		case <-c.exited:
 			c.Close()
 			return nil, c.err
@@ -105,9 +138,11 @@ func (c *Conn) Close() error {
 	case <-c.exited:
 	case <-time.After(time.Second):
 	}
-	c.port.ResetOutputBuffer()
-	c.port.SetRTS(false)
-	c.port.SetDTR(false)
+	if m, ok := c.port.(modemPort); ok {
+		m.ResetOutputBuffer()
+		m.SetRTS(false)
+		m.SetDTR(false)
+	}
 	return c.port.Close()
 }
 

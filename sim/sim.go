@@ -354,13 +354,10 @@ func (c *conn) changeLevel(d int) bool {
 	return c.in.level != old
 }
 
-// fmtTime formats clock ticks as the player might (an assumption).
+// fmtTime formats clock ticks as the real player does in "STOP PLAYING AT
+// TIME=3912": hundredths of a second.
 func fmtTime(t int32) string {
-	if t < 0 {
-		t = 0
-	}
-	s := float64(t) / se.TicksPerSecond
-	return fmt.Sprintf("%d:%04.1f", int(s)/60, math.Mod(s, 60))
+	return fmt.Sprint(max(t, 0) * 100 / se.TicksPerSecond)
 }
 
 // player imitates the PERFORMANCE PLAYER program.

@@ -156,9 +156,10 @@ deploy/deploy.sh                   # build, copy and install sepianod on the Pi 
   the songs from `~/sepiano-data` and the owner's collection from their
   Desktop (uploaded with `sepianod import`).
 - **Confirmed on the real piano through the service:** full pieces play from
-  the phone UI; Enter → "QUIT PLAYING"; Down → "LEVEL=-1" … "LEVEL=-16", and
-  −16 is the floor (Down there prints nothing).
-- **Not yet checked at the piano:** pause/resume and restart text, recording
+  the phone UI; Enter → "QUIT PLAYING"; Space → "STOP PLAYING AT TIME=3912"
+  (hundredths of a second); Down → "LEVEL=-1" … "LEVEL=-16", and −16 is the
+  floor (Down there prints nothing).
+- **Not yet checked at the piano:** resume and restart text, recording
   (`record.exe` is not installed; it's in the suite installer on the owner's
   Desktop), piano power cycles.
 - Lesson: a serial port opens only once. Close a connection fully before

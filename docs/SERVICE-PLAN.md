@@ -306,6 +306,8 @@ export) and the API end to end.
 - Rachmaninoff's Prelude and a second piece played; progress followed the
   piano's clock.
 - **Enter** stops: the player prints "QUIT PLAYING", then ends the session.
+- **Space** pauses: "STOP PLAYING AT TIME=3912", the position in hundredths
+  of a second (39.12 s; the deck's clock said 39.126 s).
 - **Down** subdues: "LEVEL=-1" … "LEVEL=-16". **The lowest level is −16**;
   Down at −16 prints nothing, and the deck takes the silence as the floor.
 - Each upload starts at "LEVEL=0 (NORMAL)" (seen at every program start).
@@ -318,8 +320,8 @@ export) and the API end to end.
 **Assumptions still to check at the piano** (Phase 0), each a small change in
 `deck/console.go` or `sim/sim.go` if the piano differs:
 
-- the exact text after Space and Esc ("STOP PLAYING AT TIME=…",
-  "RESUME PLAYING", "RESTART PERFORMANCE");
+- the text after Space when resuming ("RESUME PLAYING") and after Esc
+  ("RESTART PERFORMANCE");
 - whether a level set during one piece carries into the next upload (the
   deck re-applies the remembered level either way);
 - the recorder: that it uses the command-line name and the `.kb$` →

@@ -9,6 +9,10 @@ app can drive.
   decoded
 * `docs/SE-SERIAL-PROTOCOL.md` — the PC ⇄ instrument link, program upload,
   console and file service, plus why USB adapters misbehave
+* `docs/SERVICE-PLAN.md` — the proposed piano service (library, playback,
+  recording, web UI, later an iPhone app), with its open decisions
+* `CLAUDE.md` — working notes for Claude Code sessions: hardware setup, rules,
+  and pitfalls
 
 ## The big finding
 
@@ -86,8 +90,9 @@ two computers.
    works. The Pi's built-in UART (`/dev/serial0`) through a **MAX3232 RS-232
    level shifter** would remove USB entirely. Never wire the Pi's 3.3 V pins
    straight to the RS-232 cable.
-4. Then wrap `host.Session` in a small HTTP/WebSocket service (song library,
-   play/stop/level), which the iPhone app can call.
+4. Then build the piano service proposed in `docs/SERVICE-PLAN.md`: a daemon
+   on the Pi with a song library, playback, volume and recording controls, and
+   a web UI that a phone can use, ahead of a native iPhone app.
 
 ## Layout
 

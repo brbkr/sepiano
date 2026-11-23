@@ -1,6 +1,7 @@
 # build output
 /bin/
 /bin-*/
+/dist/
 
 # raw serial captures (sehost -capture, sesniff -dump)
 *.tx

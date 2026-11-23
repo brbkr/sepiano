@@ -1,0 +1,21 @@
+# build output
+/bin/
+/bin-*/
+
+# raw serial captures (sehost -capture, sesniff -dump)
+*.tx
+*.rx
+/cap/
+
+# Never commit copyrighted material: recordings, suite executables, Z80 images
+*.kb
+*.lp
+*.sp
+*.kb$
+*.lp$
+*.sp$
+*.mid
+*.exe
+*.EXE
+*.z80
+*.img

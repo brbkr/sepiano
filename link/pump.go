@@ -39,6 +39,11 @@ type Pump struct {
 	RawRx   io.Writer               // optional capture of received bytes
 	RawTx   io.Writer               // optional capture of transmitted bytes
 
+	// Stamp, if set, supplies the ts field of each transmitted frame. The PC
+	// host leaves it unset (ts = 0); a simulated instrument uses it to send
+	// its performance clock.
+	Stamp func() uint16
+
 	Decoder Decoder
 	TxBytes int64
 	RxBytes int64
@@ -127,6 +132,9 @@ func (p *Pump) Run(ctx context.Context) error {
 		for sent+float64(len(out)) < budget {
 			if len(cur) == 0 {
 				f := p.L.Next()
+				if p.Stamp != nil {
+					f.TS = p.Stamp()
+				}
 				if p.OnFrame != nil {
 					p.OnFrame(true, f)
 				}

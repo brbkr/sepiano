@@ -8,10 +8,13 @@ Stahnke SE reproducing piano. The piano is a Steinway with the SE system
 - `docs/SE-FILE-FORMAT.md` and `docs/SE-SERIAL-PROTOCOL.md` are the
   reverse-engineered specifications. Trust them; every claim is backed by the
   decompiled code, the file collection or captures from the real piano.
-- `docs/SERVICE-PLAN.md` is the proposed next step: a service on a Raspberry
-  Pi hidden in the piano, with a web UI and later an iPhone app. **It is a
-  proposal. The piano's owner decides what to build and in what order.** Check
-  its "Open decisions" before starting large work.
+- `docs/SERVICE-PLAN.md` is the piano service, `sepianod`: a daemon on the
+  Raspberry Pi hidden in the piano, with a web UI and later an iPhone app.
+  Phase 1 is built and installed on the Pi. **The piano's owner decides what
+  to build next and in what order.** Check its "Open decisions" before
+  starting large work.
+- `api/openapi.yaml` is the service's API contract; keep it in step with
+  `api/server.go`.
 
 ## How it works, in one paragraph
 
@@ -29,15 +32,29 @@ and a file server (channel 2: the Z80 asks for blocks of `.kb/.lp/.sp`).
 | `smf/` | minimal MIDI file reader/writer |
 | `link/` | frames, CRC, ARQ link, clock-paced pump, simulated cable (`NewPipe`) |
 | `host/` | Z80 program extraction, session, console keys, file service |
-| `cmd/` | `sedump`, `se2mid`, `mid2se`, `sehost`, `sesniff` |
+| `sim/` | simulated instrument: real link protocol, player/recorder behaviour, 800 Hz clock |
+| `deck/` | the instrument controller: one goroutine owns the link, keys ⇄ console confirmations |
+| `library/` | performance store: files + `.json` metadata, in-memory index, upload/zip/MIDI/export |
+| `api/` | REST + SSE (`openapi.yaml`), program installs, touch icon |
+| `web/` | the PWA: plain HTML/CSS/JS, no build step, embedded in `sepianod` |
+| `cmd/` | `sedump`, `se2mid`, `mid2se`, `sehost`, `sesniff`, `sepianod` |
+| `deploy/` | systemd unit, udev rule, avahi file, `install.sh` (on the Pi), `deploy.sh` (from here) |
 
 ## Commands
 
 ```bash
-go vet ./... && go test ./...      # all tests; link tests take about 25 s
+go vet ./... && go test ./...      # all tests; link tests take about 25 s, deck about 13 s
 gofmt -l .                         # must print nothing
 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/ ./cmd/...   # for the Pi
+go run ./cmd/sepianod -simulate -addr 127.0.0.1:8080 -data ./devdata             # service + UI, no piano
+deploy/deploy.sh                   # build, copy and install sepianod on the Pi (ssh alias "pi")
 ```
+
+- On Windows, Git Bash's `ssh` can't use keys held by the Windows ssh-agent.
+  Use Windows' OpenSSH: `SSH=/c/Windows/System32/OpenSSH/ssh.exe
+  SCP=/c/Windows/System32/OpenSSH/scp.exe deploy/deploy.sh`.
+- Git for Windows defaults to `core.autocrlf=true`; `.gitattributes` keeps
+  checkouts LF so `gofmt -l .` stays clean.
 
 - Corpus tests read the recordings from the parent folder or `$SE_CORPUS`, and
   skip when they aren't there.
@@ -61,6 +78,20 @@ GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/ ./cmd/...  
     used to capture the original `play.exe`. It has been `/dev/ttyUSB0`.
 - **The piano talks at 57600 baud.** It is silent until a host sends a
   handshake.
+
+### The service on the Pi
+
+- `sepianod` runs as the `sepiano` user (systemd unit `sepianod`), serves
+  `http://raspberrypi.local/` on port 80, and keeps an idle link to the piano
+  on `/dev/sepiano-piano` (a udev symlink to the PL2303).
+- Data: `/var/lib/sepiano/{library,programs,staging,settings.json}`.
+  `play.exe` is installed in `programs/`; `record.exe` is not yet (it isn't on
+  the Pi).
+- **It owns the serial port.** Before using `sehost` by hand:
+  `sudo systemctl stop sepianod`; afterwards `sudo systemctl start sepianod`.
+- Logs: `journalctl -u sepianod -f`. Status: `curl -s localhost/api/v1/status`.
+- Add songs: `sepianod import DIR` on the Pi (uploads to the running service),
+  or the web UI's Upload screen.
 
 ### Working with the piano
 
@@ -115,3 +146,22 @@ GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/ ./cmd/...  
 - Not yet tried: the player keys over the link, `record.exe`, re-uploading on
   a link that's still up, and piano power cycles. That's Phase 0 in
   `docs/SERVICE-PLAN.md`, which needs someone at the piano.
+
+## Status (end of the second session: the service)
+
+- `sepianod` Phase 1 is built: deck, simulator, library, API, PWA, recording,
+  deploy. All of it is tested against `sim/` (`go test ./...`).
+- Installed on the Pi. The idle link to the real piano comes up and stays
+  clean (no retransmits or NAKs); `play.exe` is installed. The library holds
+  the songs from `~/sepiano-data` and the owner's collection from their
+  Desktop (uploaded with `sepianod import`).
+- **Confirmed on the real piano through the service:** full pieces play from
+  the phone UI; Enter → "QUIT PLAYING"; Space → "STOP PLAYING AT TIME=3912"
+  (hundredths of a second); Down → "LEVEL=-1" … "LEVEL=-16", and −16 is the
+  floor (Down there prints nothing).
+- **Not yet checked at the piano:** resume and restart text, recording
+  (`record.exe` is not installed; it's in the suite installer on the owner's
+  Desktop), piano power cycles.
+- Lesson: a serial port opens only once. Close a connection fully before
+  opening the next (`deck.release`), and close the port when a link dies.
+  `sim.Instrument.Dial` enforces this so tests catch it.

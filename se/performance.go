@@ -57,21 +57,37 @@ func Load(base string) (*Performance, error) {
 // holding their last value to cover End plus a one-second margin.
 func (p *Performance) Save(base string) error {
 	base = TrimExt(base)
+	kb, lp, sp, err := p.Encode()
+	if err != nil {
+		return err
+	}
+	for _, f := range []struct {
+		ext string
+		b   []byte
+	}{{".kb", kb}, {".lp", lp}, {".sp", sp}} {
+		if err := os.WriteFile(base+f.ext, f.b, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Encode returns the contents of the .kb, .lp and .sp files that Save
+// writes, with the same pedal extension.
+func (p *Performance) Encode() (kb, lp, sp []byte, err error) {
 	end := p.KB.End
 	if n := len(p.KB.Events); n > 0 && p.KB.Events[n-1].Tick > end {
 		end = p.KB.Events[n-1].Tick
 	}
 	need := func(period uint32) int { return int((end+TicksPerSecond)/period) + 1 }
-	kb, err := p.KB.Encode(true)
-	if err != nil {
-		return err
+	if kb, err = p.KB.Encode(true); err != nil {
+		return nil, nil, nil, err
 	}
-	files := map[string][]byte{".kb": kb}
 	for _, f := range []struct {
-		ext    string
+		dst    *[]byte
 		ped    *Pedal
 		period uint32
-	}{{".lp", p.Damper, DamperPeriod}, {".sp", p.Soft, SoftPeriod}} {
+	}{{&lp, p.Damper, DamperPeriod}, {&sp, p.Soft, SoftPeriod}} {
 		ped := &Pedal{}
 		if f.ped != nil {
 			ped.Seed, ped.Samples = f.ped.Seed, append([]byte(nil), f.ped.Samples...)
@@ -83,16 +99,11 @@ func (p *Performance) Save(base string) error {
 		for len(ped.Samples) < need(f.period) {
 			ped.Samples = append(ped.Samples, last)
 		}
-		if files[f.ext], err = ped.Encode(); err != nil {
-			return err
+		if *f.dst, err = ped.Encode(); err != nil {
+			return nil, nil, nil, err
 		}
 	}
-	for ext, b := range files {
-		if err := os.WriteFile(base+ext, b, 0o644); err != nil {
-			return err
-		}
-	}
-	return nil
+	return kb, lp, sp, nil
 }
 
 // Duration is the length of the key stream.

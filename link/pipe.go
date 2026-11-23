@@ -57,14 +57,30 @@ func (w *wire) Read(p []byte) (int, error) {
 	return n, nil
 }
 
+func (w *wire) close() {
+	w.mu.Lock()
+	w.closed = true
+	w.mu.Unlock()
+	w.cond.Broadcast()
+}
+
 type duplex struct{ r, w *wire }
 
 func (d duplex) Read(p []byte) (int, error)  { return d.r.Read(p) }
 func (d duplex) Write(p []byte) (int, error) { return d.w.Write(p) }
 
+// Close unplugs the cable: once buffered bytes are read, both ends' reads
+// return io.EOF.
+func (d duplex) Close() error {
+	d.r.close()
+	d.w.close()
+	return nil
+}
+
 // NewPipe returns the two ends of a simulated serial cable. Each direction
 // corrupts a byte with probability flip and loses one with probability drop.
-// Reads time out after a few milliseconds, like a serial port.
+// Reads time out after a few milliseconds, like a serial port. Both ends also
+// implement io.Closer; closing either one unplugs the cable.
 func NewPipe(flip, drop float64) (Port, Port) {
 	ab, ba := newWire(1, flip, drop), newWire(2, flip, drop)
 	return duplex{r: ba, w: ab}, duplex{r: ab, w: ba}

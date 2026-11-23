@@ -20,3 +20,6 @@
 *.EXE
 *.z80
 *.img
+
+# sepianod -simulate data
+/devdata/
